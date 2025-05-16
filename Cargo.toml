@@ -6,4 +6,4 @@ edition = "2024"
 [dependencies]
 calamine = "0.22.1"
 clap = { version = "4.5.1", features = ["derive"] }
-xlsxwriter = "0.3.0"
+rust_xlsxwriter = "0.38.0"
