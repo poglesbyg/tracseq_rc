@@ -1,0 +1,9 @@
+[package]
+name = "tracseq_rc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+calamine = "0.22.1"
+clap = { version = "4.5.1", features = ["derive"] }
+xlsxwriter = "0.3.0"
