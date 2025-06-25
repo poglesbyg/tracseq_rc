@@ -138,12 +138,6 @@ The tool handles common error scenarios:
 5. Run the test suite
 6. Submit a pull request
 
-## License
-
-[Add your license information here]
-
-## Changelog
-
 ### Version 0.1.0
 - Initial release
 - Basic Excel file processing
