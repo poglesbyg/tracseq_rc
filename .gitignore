@@ -65,3 +65,4 @@ cov.info
 # Temporary files
 *.tmp
 *.temp
+Cargo.lock
