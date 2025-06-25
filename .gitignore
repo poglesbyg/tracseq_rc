@@ -1,4 +1,29 @@
-/target
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Windows specific
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Office files
 *.xlsx
 *.xls
 *.xlsm
@@ -6,3 +31,37 @@
 *.xltx
 *.xltm
 *.xlt
+*.docx
+*.doc
+*.pptx
+*.ppt
+~$*
+
+# Log files
+*.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Test artifacts
+/tests/fixtures/output/
+/tests/tmp/
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Coverage reports
+tarpaulin-report.html
+lcov.info
+cov.info
+
+# Documentation build
+/target/doc/
+
+# Temporary files
+*.tmp
+*.temp
