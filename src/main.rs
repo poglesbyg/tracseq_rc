@@ -3,12 +3,28 @@ use clap::Parser;
 use rust_xlsxwriter::Workbook;
 use std::path::PathBuf;
 use tracseq_rc::reverse_complement;
+use csv::{ReaderBuilder, WriterBuilder};
+use std::fs::File;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Path to the Excel file
+    /// Path to the Excel or CSV file
     file: PathBuf,
+}
+
+#[derive(Debug)]
+enum FileType {
+    Excel,
+    Csv,
+}
+
+fn detect_file_type(path: &PathBuf) -> Result<FileType, Box<dyn std::error::Error>> {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("xlsx") | Some("xls") => Ok(FileType::Excel),
+        Some("csv") => Ok(FileType::Csv),
+        _ => Err("Unsupported file type. Please use .xlsx, .xls, or .csv files.".into()),
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -146,20 +162,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             // Print SQL update statement if both values are present
             if let (Some(id), Some(rc)) = (id_value.clone(), rc_value.clone()) {
-                if let Some(idx) = indexnt_col {
-                    if rc_value.is_some() && id_value.is_some() {
-                        println!(
-                            "UPDATE SampleBatchItems SET IndexNtSequence = '{}' WHERE Id = {};",
-                            rc, id
-                        );
-                    }
-                } else if let Some(idx) = index_col {
-                    if rc_value.is_some() && id_value.is_some() {
-                        println!(
-                            "UPDATE SampleBatchItems SET [Index] = '{}' WHERE Id = {};",
-                            rc, id
-                        );
-                    }
+                if indexnt_col.is_some() {
+                    println!(
+                        "UPDATE SampleBatchItems SET IndexNtSequence = '{}' WHERE Id = {};",
+                        rc, id
+                    );
+                } else if indexnt2_col.is_some() {
+                    println!(
+                        "UPDATE SampleBatchItems SET IndexNtSequence2 = '{}' WHERE Id = {};",
+                        rc, id
+                    );
+                } else if index2_col.is_some() {
+                    println!(
+                        "UPDATE SampleBatchItems SET [Index 2] = '{}' WHERE Id = {};",
+                        rc, id
+                    );
+                } else if index_col.is_some() {
+                    println!(
+                        "UPDATE SampleBatchItems SET [Index] = '{}' WHERE Id = {};",
+                        rc, id
+                    );
                 }
             }
             data_row_count += 1;
