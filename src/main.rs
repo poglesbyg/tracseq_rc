@@ -27,20 +27,223 @@ fn detect_file_type(path: &PathBuf) -> Result<FileType, Box<dyn std::error::Erro
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+fn process_csv_file(file_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\nProcessing CSV file...");
+    
+    // Create output filename
+    let output_path = file_path.with_file_name(format!(
+        "{}_RC.csv",
+        file_path.file_stem().unwrap().to_string_lossy()
+    ));
+    
+    // Open input CSV file
+    let file = File::open(file_path)?;
+    let mut reader = ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(file);
+    
+    // Get headers
+    let headers = reader.headers()?.clone();
+    
+    // Find column indices
+    let indexnt_col = headers.iter().position(|h| h == "IndexNtSequence");
+    let indexnt2_col = headers.iter().position(|h| h == "IndexNtSequence2");
+    let index2_col = headers.iter().position(|h| h == "Index 2");
+    let index_col = headers.iter().position(|h| h == "Index");
+    let id_col = headers.iter().position(|h| h == "Id" || h == "Sample ID");
+    
+    // Detect columns containing DNA sequences
+    println!("\nScanning for DNA sequence columns...");
+    let mut sequence_columns: Vec<(usize, String, bool)> = Vec::new();
+    
+    // First check if we have standard columns
+    if indexnt_col.is_some() || indexnt2_col.is_some() || index2_col.is_some() || index_col.is_some() {
+        if let Some(idx) = indexnt_col {
+            sequence_columns.push((idx, "IndexNtSequence".to_string(), true));
+        }
+        if let Some(idx) = indexnt2_col {
+            sequence_columns.push((idx, "IndexNtSequence2".to_string(), false));
+        }
+        if let Some(idx) = index2_col {
+            sequence_columns.push((idx, "Index 2".to_string(), false));
+        }
+        if let Some(idx) = index_col {
+            sequence_columns.push((idx, "Index".to_string(), true));
+        }
+    } else {
+        // No standard columns, scan for DNA patterns in first few rows
+        let mut sample_reader = ReaderBuilder::new()
+            .has_headers(true)
+            .from_reader(File::open(file_path)?);
+        
+        let sample_records: Vec<_> = sample_reader.records()
+            .take(10)
+            .filter_map(Result::ok)
+            .collect();
+        
+        for col_idx in 0..headers.len() {
+            let mut has_sequences = false;
+            let mut has_delimiter = false;
+            
+            for record in &sample_records {
+                if let Some(field) = record.get(col_idx) {
+                    if field.len() >= 4 {
+                        if field.contains('-') {
+                            let parts: Vec<&str> = field.split('-').collect();
+                            if parts.len() == 2 && parts[1].len() >= 4 {
+                                if parts[1].chars().all(|c| "ATGCN".contains(c)) {
+                                    has_sequences = true;
+                                    has_delimiter = true;
+                                    break;
+                                }
+                            }
+                        } else if field.chars().all(|c| "ATGCN".contains(c)) {
+                            has_sequences = true;
+                            has_delimiter = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if has_sequences {
+                let col_name = headers.get(col_idx).map(|s| s.to_string()).unwrap_or_else(|| format!("Column_{}", col_idx + 1));
+                sequence_columns.push((col_idx, col_name, has_delimiter));
+            }
+        }
+    }
+    
+    // Debug output to show which columns were detected
+    println!("\nDetected columns:");
+    println!("- Id column: {}", if id_col.is_some() { "Found" } else { "NOT FOUND" });
+    
+    if sequence_columns.is_empty() {
+        println!("- Sequence columns: NOT FOUND");
+        println!("\n⚠️  Warning: No DNA sequence columns detected.");
+        if id_col.is_some() {
+            println!("   Id column found but no sequence data to process.");
+        }
+    } else {
+        println!("- Sequence columns found: {}", sequence_columns.len());
+        for (idx, name, delim) in &sequence_columns {
+            println!("  * Column {}: '{}' (delimiter: {})", idx + 1, name, if *delim { "yes" } else { "no" });
+        }
+    }
+    
+    println!("\nAll columns in file:");
+    for (idx, header) in headers.iter().enumerate() {
+        println!("  Column {}: '{}'", idx + 1, header);
+    }
+    
+    // Create output CSV file
+    let output_file = File::create(&output_path)?;
+    let mut writer = WriterBuilder::new()
+        .has_headers(true)
+        .from_writer(output_file);
+    
+    // Write headers
+    writer.write_record(&headers)?;
+    
+    let mut data_row_count = 0;
+    
+    // Process rows
+    for result in reader.records() {
+        let record = result?;
+        let mut output_record = Vec::new();
+        let mut rc_value: Option<String> = None;
+        let mut id_value: Option<String> = None;
+        let mut processed_col_name: Option<String> = None;
+        
+        // Get ID value if present
+        if let Some(idx) = id_col {
+            if let Some(field) = record.get(idx) {
+                id_value = Some(field.to_string());
+            }
+        }
+        
+        for (col_idx, field) in record.iter().enumerate() {
+            // Check if this column is a sequence column
+            let mut processed = false;
+            for (seq_col_idx, seq_col_name, has_delimiter) in &sequence_columns {
+                if col_idx == *seq_col_idx {
+                    if *has_delimiter {
+                        // Handle delimiter pattern
+                        let parts: Vec<&str> = field.splitn(2, '-').collect();
+                        if parts.len() == 2 {
+                            let rc = reverse_complement(parts[1]);
+                            let new_val = format!("{}-{}", parts[0], rc);
+                            rc_value = Some(new_val.clone());
+                            processed_col_name = Some(seq_col_name.clone());
+                            output_record.push(new_val);
+                        } else {
+                            // No delimiter found, treat as full sequence
+                            let rc = reverse_complement(field);
+                            rc_value = Some(rc.clone());
+                            processed_col_name = Some(seq_col_name.clone());
+                            output_record.push(rc);
+                        }
+                    } else {
+                        // Direct sequence pattern
+                        let rc = reverse_complement(field);
+                        rc_value = Some(rc.clone());
+                        processed_col_name = Some(seq_col_name.clone());
+                        output_record.push(rc);
+                    }
+                    processed = true;
+                    break;
+                }
+            }
+            
+            if !processed {
+                // Copy non-sequence fields as-is
+                output_record.push(field.to_string());
+            }
+        }
+        
+        // Write the output record
+        writer.write_record(&output_record)?;
+        
+        // Print SQL update statement if both values are present and ID is not empty
+        if let (Some(id), Some(rc), Some(col_name)) = (id_value, rc_value, processed_col_name) {
+            if !id.trim().is_empty() {
+                // Generate SQL with proper column name escaping
+                if col_name.contains(' ') || col_name.starts_with("Column_") {
+                    println!(
+                        "UPDATE SampleBatchItems SET [{}] = '{}' WHERE Id = '{}';",
+                        col_name, rc, id
+                    );
+                } else {
+                    println!(
+                        "UPDATE SampleBatchItems SET {} = '{}' WHERE Id = '{}';",
+                        col_name, rc, id
+                    );
+                }
+            }
+        }
+        
+        data_row_count += 1;
+    }
+    
+    writer.flush()?;
+    
+    println!("File processed successfully!");
+    println!("Output saved to: {}", output_path.display());
+    println!("\nNumber of data rows: {}", data_row_count);
+    println!("Number of columns: {}", headers.len());
+    
+    Ok(())
+}
 
+fn process_excel_file(file_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\nProcessing Excel file...");
+    
     // Open the input Excel file
-    let mut input_workbook: Xlsx<_> = calamine::open_workbook(&args.file)?;
+    let mut input_workbook: Xlsx<_> = calamine::open_workbook(file_path)?;
 
     // Create output filename
-    let output_path = args.file.with_file_name(format!(
-        "{}_RC{}",
-        args.file.file_stem().unwrap().to_string_lossy(),
-        args.file
-            .extension()
-            .map(|ext| format!(".{}", ext.to_string_lossy()))
-            .unwrap_or_default()
+    let output_path = file_path.with_file_name(format!(
+        "{}_RC.xlsx",
+        file_path.file_stem().unwrap().to_string_lossy()
     ));
 
     // Create new workbook for output
@@ -49,17 +252,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Get the first sheet
     if let Some(Ok(range)) = input_workbook.worksheet_range_at(0) {
-        println!("\nProcessing file...");
-
-        // Find the header row (first row)
-        let mut rows = range.rows();
-        let header_row = match rows.next() {
+        // Find the row that starts with "Sample ID"
+        let all_rows: Vec<_> = range.rows().collect();
+        let mut header_row_idx = None;
+        let mut header_row = None;
+        
+        println!("\nSearching for 'Sample ID' header row...");
+        for (idx, row) in all_rows.iter().enumerate() {
+            if let Some(first_cell) = row.get(0) {
+                if first_cell.to_string().trim() == "Sample ID" {
+                    header_row_idx = Some(idx);
+                    header_row = Some(row);
+                    println!("Found 'Sample ID' header at row {}", idx + 1);
+                    break;
+                }
+            }
+        }
+        
+        let header_row = match header_row {
             Some(row) => row,
             None => {
-                println!("No data found in the sheet.");
+                println!("Error: Could not find a row starting with 'Sample ID'");
+                println!("This file may not contain sample data in the expected format.");
                 return Ok(());
             }
         };
+        
+        let header_row_idx = header_row_idx.unwrap();
+        
+        println!("\nAnalyzing file structure...");
+        println!("Found {} columns", header_row.len());
 
         // Write header row
         for (col, cell) in header_row.iter().enumerate() {
@@ -75,113 +297,189 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .position(|c| c.to_string() == "IndexNtSequence2");
         let index2_col = header_row.iter().position(|c| c.to_string() == "Index 2");
         let index_col = header_row.iter().position(|c| c.to_string() == "Index");
-        let id_col = header_row.iter().position(|c| c.to_string() == "Id");
+        // Look for both "Id" and "Sample ID" columns
+        let id_col = header_row.iter().position(|c| {
+            let col = c.to_string();
+            col == "Id" || col == "Sample ID"
+        });
 
-        let mut data_row_count = 0;
-        for (row_idx, row) in rows.enumerate() {
-            let mut rc_value: Option<String> = None;
-            let mut id_value: Option<String> = None;
-            for (col_idx, cell) in row.iter().enumerate() {
-                if let Some(idx) = indexnt_col {
-                    // Handle IndexNtSequence logic
-                    if col_idx == idx {
+        // Detect columns containing DNA sequences by scanning data
+        println!("\nScanning for DNA sequence columns...");
+        let mut sequence_columns: Vec<(usize, String, bool)> = Vec::new(); // (index, name, has_delimiter)
+        
+        // First check if we have standard columns
+        if indexnt_col.is_some() || indexnt2_col.is_some() || index2_col.is_some() || index_col.is_some() {
+            if let Some(idx) = indexnt_col {
+                sequence_columns.push((idx, "IndexNtSequence".to_string(), true));
+            }
+            if let Some(idx) = indexnt2_col {
+                sequence_columns.push((idx, "IndexNtSequence2".to_string(), false));
+            }
+            if let Some(idx) = index2_col {
+                sequence_columns.push((idx, "Index 2".to_string(), false));
+            }
+            if let Some(idx) = index_col {
+                sequence_columns.push((idx, "Index".to_string(), true));
+            }
+        } else {
+            // No standard columns, scan for DNA patterns in rows after the header
+            let sample_rows: Vec<_> = all_rows.iter()
+                .skip(header_row_idx + 1)
+                .take(10)
+                .collect();
+            
+            for col_idx in 0..header_row.len() {
+                let mut has_sequences = false;
+                let mut has_delimiter = false;
+                
+                for row in &sample_rows {
+                    if let Some(cell) = row.get(col_idx) {
                         let val = cell.to_string();
-                        let parts = val.splitn(2, '-').collect::<Vec<_>>();
-                        if parts.len() == 2 {
-                            let rc = reverse_complement(parts[1]);
-                            let new_val = format!("{}-{}", parts[0], rc);
-                            rc_value = Some(new_val.clone());
-                            sheet.write_string((row_idx + 1) as u32, col_idx as u16, &new_val)?;
-                        } else {
-                            rc_value = Some(val.clone());
-                            sheet.write_string((row_idx + 1) as u32, col_idx as u16, &val)?;
+                        // Only consider it a sequence if it's at least 4 characters of DNA
+                        if val.len() >= 4 {
+                            // Check for delimiter pattern (e.g., "Prefix-SEQUENCE")
+                            if val.contains('-') {
+                                let parts: Vec<&str> = val.split('-').collect();
+                                if parts.len() == 2 && parts[1].len() >= 4 {
+                                    // More strict check: at least 80% should be ATGCN
+                                    let dna_chars = parts[1].chars().filter(|c| "ATGCN".contains(*c)).count();
+                                    if dna_chars as f32 / parts[1].len() as f32 >= 0.8 {
+                                        has_sequences = true;
+                                        has_delimiter = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            // Check for direct sequence pattern - must be all DNA chars
+                            else if val.len() >= 6 && val.chars().all(|c| "ATGCN".contains(c)) {
+                                has_sequences = true;
+                                has_delimiter = false;
+                                break;
+                            }
                         }
-                    } else {
-                        sheet.write_string(
-                            (row_idx + 1) as u32,
-                            col_idx as u16,
-                            &cell.to_string(),
-                        )?;
                     }
-                } else if let Some(idx) = indexnt2_col {
-                    // Handle IndexNtSequence2 logic - reverse complement entire value
-                    if col_idx == idx {
-                        let rc = reverse_complement(&cell.to_string());
-                        rc_value = Some(rc.clone());
-                        sheet.write_string((row_idx + 1) as u32, col_idx as u16, &rc)?;
-                    } else {
-                        sheet.write_string(
-                            (row_idx + 1) as u32,
-                            col_idx as u16,
-                            &cell.to_string(),
-                        )?;
-                    }
-                } else if let Some(idx) = index2_col {
-                    // Handle Index 2 logic
-                    if col_idx == idx {
-                        let rc = reverse_complement(&cell.to_string());
-                        rc_value = Some(rc.clone());
-                        sheet.write_string((row_idx + 1) as u32, col_idx as u16, &rc)?;
-                    } else {
-                        sheet.write_string(
-                            (row_idx + 1) as u32,
-                            col_idx as u16,
-                            &cell.to_string(),
-                        )?;
-                    }
-                } else if let Some(idx) = index_col {
-                    // Handle Index logic - reverse complement second part after '-'
-                    if col_idx == idx {
-                        let val = cell.to_string();
-                        let parts = val.splitn(2, '-').collect::<Vec<_>>();
-                        if parts.len() == 2 {
-                            let rc = reverse_complement(parts[0]);
-                            let new_val = format!("{}-{}", parts[0], rc);
-                            rc_value = Some(new_val.clone());
-                            sheet.write_string((row_idx + 1) as u32, col_idx as u16, &new_val)?;
-                        } else {
-                            rc_value = Some(val.clone());
-                            sheet.write_string((row_idx + 1) as u32, col_idx as u16, &val)?;
-                        }
-                    } else {
-                        sheet.write_string(
-                            (row_idx + 1) as u32,
-                            col_idx as u16,
-                            &cell.to_string(),
-                        )?;
-                    }
-                } else {
-                    // No special columns, just copy
-                    sheet.write_string((row_idx + 1) as u32, col_idx as u16, &cell.to_string())?;
                 }
-                if let Some(idx) = id_col {
-                    if col_idx == idx {
-                        id_value = Some(cell.to_string());
+                
+                if has_sequences {
+                    let col_name = header_row[col_idx].to_string();
+                    if col_name.is_empty() {
+                        sequence_columns.push((col_idx, format!("Column_{}", col_idx + 1), has_delimiter));
+                    } else {
+                        sequence_columns.push((col_idx, col_name, has_delimiter));
                     }
                 }
             }
-            // Print SQL update statement if both values are present
-            if let (Some(id), Some(rc)) = (id_value.clone(), rc_value.clone()) {
-                if indexnt_col.is_some() {
-                    println!(
-                        "UPDATE SampleBatchItems SET IndexNtSequence = '{}' WHERE Id = {};",
-                        rc, id
-                    );
-                } else if indexnt2_col.is_some() {
-                    println!(
-                        "UPDATE SampleBatchItems SET IndexNtSequence2 = '{}' WHERE Id = {};",
-                        rc, id
-                    );
-                } else if index2_col.is_some() {
-                    println!(
-                        "UPDATE SampleBatchItems SET [Index 2] = '{}' WHERE Id = {};",
-                        rc, id
-                    );
-                } else if index_col.is_some() {
-                    println!(
-                        "UPDATE SampleBatchItems SET [Index] = '{}' WHERE Id = {};",
-                        rc, id
-                    );
+        }
+
+        // Debug output to show which columns were detected
+        println!("\nColumns in Sample ID section:");
+        for (idx, cell) in header_row.iter().enumerate() {
+            let col_name = cell.to_string();
+            if !col_name.is_empty() {
+                println!("  Column {}: '{}'", idx + 1, col_name);
+            }
+        }
+        
+        println!("\nDetected columns:");
+        println!("- Id column: {}", if id_col.is_some() { "Found" } else { "NOT FOUND" });
+        
+        if sequence_columns.is_empty() {
+            println!("- Sequence columns: NOT FOUND");
+            println!("\n⚠️  Warning: No DNA sequence columns detected.");
+            if id_col.is_some() {
+                println!("   Id column found but no sequence data to process.");
+            }
+            
+            // Show sample data from first few rows to help diagnose
+            println!("\nShowing first 3 data rows to help identify sequence columns:");
+            for (i, row) in all_rows.iter().skip(header_row_idx + 1).take(3).enumerate() {
+                println!("  Row {}:", i + 1);
+                for (j, cell) in row.iter().enumerate() {
+                    let val = cell.to_string();
+                    if !val.is_empty() && val != "0" {
+                        println!("    Column {}: '{}'", j + 1, 
+                            if val.len() > 30 { format!("{}...", &val[..30]) } else { val });
+                    }
+                }
+            }
+        } else {
+            println!("- Sequence columns found: {}", sequence_columns.len());
+            for (idx, name, delim) in &sequence_columns {
+                println!("  * Column {}: '{}' (delimiter: {})", idx + 1, name, if *delim { "yes" } else { "no" });
+            }
+        }
+        
+        let mut data_row_count = 0;
+        // Only process rows after the header row
+        for (idx, row) in all_rows.iter().enumerate().skip(header_row_idx + 1) {
+            let row_idx = idx - header_row_idx - 1; // Adjust for output row index
+            let mut rc_value: Option<String> = None;
+            let mut id_value: Option<String> = None;
+            let mut processed_col_name: Option<String> = None;
+            
+            // Get ID value if present
+            if let Some(idx) = id_col {
+                if let Some(cell) = row.get(idx) {
+                    id_value = Some(cell.to_string());
+                }
+            }
+            
+            // Process each cell in the row
+            for (col_idx, cell) in row.iter().enumerate() {
+                // Check if this column is a sequence column
+                let mut processed = false;
+                for (seq_col_idx, seq_col_name, has_delimiter) in &sequence_columns {
+                    if col_idx == *seq_col_idx {
+                        let val = cell.to_string();
+                        if *has_delimiter {
+                            // Handle delimiter pattern (e.g., "Prefix-SEQUENCE")
+                            let parts = val.splitn(2, '-').collect::<Vec<_>>();
+                            if parts.len() == 2 {
+                                let rc = reverse_complement(parts[1]);
+                                let new_val = format!("{}-{}", parts[0], rc);
+                                rc_value = Some(new_val.clone());
+                                processed_col_name = Some(seq_col_name.clone());
+                                sheet.write_string((row_idx + 1) as u32, col_idx as u16, &new_val)?;
+                            } else {
+                                // No delimiter found, treat as full sequence
+                                let rc = reverse_complement(&val);
+                                rc_value = Some(rc.clone());
+                                processed_col_name = Some(seq_col_name.clone());
+                                sheet.write_string((row_idx + 1) as u32, col_idx as u16, &rc)?;
+                            }
+                        } else {
+                            // Direct sequence pattern
+                            let rc = reverse_complement(&val);
+                            rc_value = Some(rc.clone());
+                            processed_col_name = Some(seq_col_name.clone());
+                            sheet.write_string((row_idx + 1) as u32, col_idx as u16, &rc)?;
+                        }
+                        processed = true;
+                        break;
+                    }
+                }
+                
+                if !processed {
+                    // Copy non-sequence columns as-is
+                    sheet.write_string((row_idx + 1) as u32, col_idx as u16, &cell.to_string())?;
+                }
+            }
+            
+            // Print SQL update statement if both values are present and ID is not empty
+            if let (Some(id), Some(rc), Some(col_name)) = (id_value, rc_value, processed_col_name) {
+                if !id.trim().is_empty() {
+                    // Generate SQL with proper column name escaping
+                    if col_name.contains(' ') || col_name.starts_with("Column_") {
+                        println!(
+                            "UPDATE SampleBatchItems SET [{}] = '{}' WHERE Id = '{}';",
+                            col_name, rc, id
+                        );
+                    } else {
+                        println!(
+                            "UPDATE SampleBatchItems SET {} = '{}' WHERE Id = '{}';",
+                            col_name, rc, id
+                        );
+                    }
                 }
             }
             data_row_count += 1;
@@ -199,6 +497,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
+    // Detect file type and process accordingly
+    match detect_file_type(&args.file)? {
+        FileType::Excel => process_excel_file(&args.file),
+        FileType::Csv => process_csv_file(&args.file),
+    }
 }
 
 #[cfg(test)]
@@ -315,3 +623,4 @@ mod tests {
         Ok(())
     }
 }
+
